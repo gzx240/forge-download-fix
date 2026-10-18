@@ -27,8 +27,8 @@ function Find-JavaTool([string]$name) {
     }
     $cmd = Get-Command "$name.exe" -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
-    foreach ($home in @("C:\Program Files\Java\jdk-17", "C:\Program Files\Java\jdk-22")) {
-        $candidate = Join-Path $home "bin\$name.exe"
+    foreach ($jdkHome in @("C:\Program Files\Java\jdk-17", "C:\Program Files\Java\jdk-22")) {
+        $candidate = Join-Path $jdkHome "bin\$name.exe"
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
     throw "Cannot find $name.exe. Install JDK 17+ or pass -JavaHome."
