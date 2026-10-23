@@ -20,10 +20,20 @@ forge-gui/src/main/java/forge/gui/download/GuiDownloadFilteredCardImages.java
 
 URL 解析顺序改为：
 
-1. 当前印刷版本的 CDN 直链
-2. **同名其他印刷版本的 CDN 直链**（新增）
-3. Scryfall API
-4. 旧 cardforge URL
+1. 当前印刷版本 · 偏好语言的 CDN 直链
+2. **同名其他印刷版本 · 同系列 CDN 直链**（新增）
+3. **当前印刷版本 · 任意语言的 CDN 直链**（新增）
+4. **同名其他印刷版本 · 任意系列 CDN 直链**（新增）
+5. Scryfall API
+6. 旧 cardforge URL
+
+第 2 条解决 Forge 列出、但 CDN 没有的变体画槽位：改用**同系列的基础画**填充，牌面保持本系列的边框和偏好语言。例如 ACR 的 collector `272`（`Cleopatra, Exiled Pharaoh` 的第 4 张画）现在用的是同系列的 `52`（基础画）。
+
+第 3 条用于同系列没有别的版本可用、但那张画其实存在、只是缺偏好语言条目的情况。典型例子正是 ACR `272`：它在 CDN 缓存里只有 `grc`（古希腊语）条目，按 `en` 查询必然落空，接着去请求 `api.scryfall.com/cards/acr/272` 拿到 404；而 404 的 URL 不含 `/images/`，下载器不报错，于是整张卡静默留空。1/2/3 号画对应的 `52`/`119`/`233` 都有 `en` 条目，所以只有第 4 张缺。
+
+第 4 条是最后一道 CDN 兜底：同系列、其他系列都没有可用缓存时，才去别的系列找同卡名的图。
+
+> 注意：第 3 条会用非偏好语言的画作（例如英文环境下的希腊语版本），牌面文字是当地语言。如果更想优先拿到「画完全对上」的版本，把 `buildUrl` 里第 2、3 步的顺序对调即可。
 
 同时保留上游已有的：
 
@@ -35,7 +45,7 @@ URL 解析顺序改为：
 补丁文件：
 
 ~~~text
-patches/0001-prefer-cached-cdn-printings.patch
+patches/0001-cdn-printings-and-language-fallback.patch
 ~~~
 
 ## 使用方法
@@ -88,7 +98,7 @@ Forge 更新后，jar 名称可能变化。重新执行：
 如果希望从源头修复，可以把：
 
 ~~~text
-patches/0001-prefer-cached-cdn-printings.patch
+patches/0001-cdn-printings-and-language-fallback.patch
 ~~~
 
 应用到 [Card-Forge/forge](https://github.com/Card-Forge/forge) 的 fork，然后提交 PR。
@@ -101,3 +111,5 @@ patches/0001-prefer-cached-cdn-printings.patch
 - Forge 使用 GPL-3.0，本仓库同样遵循 GPL-3.0。
 - 修改前会备份 jar；可以用 `restore.ps1` 恢复。
 - 仅修改 `GuiDownloadFilteredCardImages.class`，不修改游戏数据。
+- 变体槽位复用同卡名其他版本的图时，牌面可能与当前版本不同（这是刻意的降级，避免空白卡）。
+- 若某套装的 CDN 缓存里完全没有该 collector（任何语言都没有），新逻辑仍会退到 API；这类情况需要先做一次 Scryfall 数据同步。

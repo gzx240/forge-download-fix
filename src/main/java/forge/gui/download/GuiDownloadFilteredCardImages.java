@@ -27,13 +27,16 @@ import java.util.function.Predicate;
  *
  * <p>Per face, URL resolution prefers:
  * <ol>
- *   <li>the current printing's cached CDN URL,</li>
- *   <li>any cached CDN URL for another printing of the same card name,</li>
+ *   <li>the current printing's cached CDN URL in the preferred language,</li>
+ *   <li>a cached CDN URL for another printing of the same card name in the same set,</li>
+ *   <li>the current printing's cached CDN URL in any other language,</li>
+ *   <li>a cached CDN URL for another printing of the same card name in any set,</li>
  *   <li>the rate-limited Scryfall API,</li>
  *   <li>the legacy cardforge URL.</li>
  * </ol>
  * The additional printing lookup avoids hammering api.scryfall.com for variant arts
- * that are missing from the local CDN UUID cache.
+ * that are missing from the local CDN UUID cache, and keeps a variant art slot filled
+ * instead of leaving a blank card behind a silent 404.
  */
 public class GuiDownloadFilteredCardImages extends GuiDownloadService {
 
@@ -150,55 +153,112 @@ public class GuiDownloadFilteredCardImages extends GuiDownloadService {
     }
 
     /**
-     * Best available download URL for one face.
-     * CDN for the current printing, then CDN for another printing with the same name,
-     * then the Scryfall API, then cardforge.
+     * Best available download URL for one face, in decreasing order of preference:
+     * the current printing's cached CDN URL, another printing of the same card name in
+     * the same set, that same printing in another cached language, another printing of
+     * the same card name in any set, the Scryfall API, then cardforge.
      */
     private static String buildUrl(PaperCard c, String face) {
-        String cdnUrl = buildCdnUrl(c, face);
-        if (cdnUrl != null) return cdnUrl;
+        String url = buildCdnUrl(c, face);
+        if (url != null) return url;
 
-        for (PaperCard candidate : StaticData.instance().getCommonCards().getAllCards(c)) {
-            if (candidate == null || candidate.getEdition() == null) continue;
-            if (candidate.getEdition().equalsIgnoreCase(c.getEdition())) continue;
-            cdnUrl = buildCdnUrl(candidate, face);
-            if (cdnUrl != null) return cdnUrl;
-        }
+        // Variant art slots Forge lists but the CDN does not carry: prefer the base art of
+        // the same set, so the card keeps its own set frame and the preferred language
+        // instead of showing another language's card face.
+        url = buildCdnUrlForOtherPrinting(c, face, c.getEdition());
+        if (url != null) return url;
+
+        // No sibling printing in this set: the art exists, only the preferred-language
+        // UUID is missing from the cache (e.g. ACR collector 272 is cached as grc only,
+        // so the en lookup finds nothing and the Scryfall API 404s).
+        url = buildCdnUrlInAnyLanguage(c, face);
+        if (url != null) return url;
+
+        url = buildCdnUrlForOtherPrinting(c, face, null);
+        if (url != null) return url;
 
         return buildFallbackUrl(c, face);
     }
 
-    /** Current printing's CDN URL, or null if it is not in the local UUID cache. */
+    /** Current printing's CDN URL in the preferred download language, or null if not cached. */
     private static String buildCdnUrl(PaperCard c, String face) {
-        final String collectorNum = c.getCollectorNumber();
-        if (IPaperCard.NO_COLLECTOR_NUMBER.equals(collectorNum)
-                || "0".equals(collectorNum)
-                || StringUtils.isBlank(collectorNum)) {
-            return null;
-        }
+        final String collectorNum = lookupCollectorNumber(c);
+        final String scryfallCode = lookupScryfallCode(c);
+        if (collectorNum == null || scryfallCode == null) return null;
 
         final CardEdition edition = StaticData.instance().getEditions().get(c.getEdition());
-        if (edition == null) return null;
-        final String scryfallCode = edition.getScryfallCode();
-        if (StringUtils.isBlank(scryfallCode)) return null;
-
         final String preferredLang = FModel.getPreferences().getPref(ForgePreferences.FPref.UI_CARD_DOWNLOAD_LANG);
         final String langCode = CdnUuidCache.resolvePreferredLangCode(
                 preferredLang, scryfallCode, collectorNum, edition.getCardsLangCode());
         return CdnUuidCache.getCdnUrlIfCached(scryfallCode, collectorNum, langCode, face, "normal");
     }
 
+    /** Current printing's CDN URL in whichever language the cache does hold, or null. */
+    private static String buildCdnUrlInAnyLanguage(PaperCard c, String face) {
+        final String collectorNum = lookupCollectorNumber(c);
+        final String scryfallCode = lookupScryfallCode(c);
+        if (collectorNum == null || scryfallCode == null) return null;
+
+        for (String langCode : CdnUuidCache.LANGUAGE_CODES) {
+            final String url = CdnUuidCache.getCdnUrlIfCached(scryfallCode, collectorNum, langCode, face, "normal");
+            if (url != null) return url;
+        }
+        return null;
+    }
+
+    /**
+     * CDN URL for another printing of the same card name, restricted to one set when
+     * {@code onlyEdition} is non-null. Returns null when no sibling printing is cached.
+     */
+    private static String buildCdnUrlForOtherPrinting(PaperCard c, String face, String onlyEdition) {
+        for (PaperCard candidate : StaticData.instance().getCommonCards().getAllCards(c)) {
+            if (candidate == null || candidate.getEdition() == null) continue;
+            if (isSamePrinting(candidate, c)) continue;
+            if (onlyEdition != null && !candidate.getEdition().equalsIgnoreCase(onlyEdition)) continue;
+            final String url = buildCdnUrl(candidate, face);
+            if (url != null) return url;
+        }
+        return null;
+    }
+
+    private static boolean isSamePrinting(PaperCard a, PaperCard b) {
+        return a.getArtIndex() == b.getArtIndex()
+                && sameText(a.getEdition(), b.getEdition())
+                && sameText(a.getCollectorNumber(), b.getCollectorNumber());
+    }
+
+    /** Null-safe case-insensitive comparison. */
+    private static boolean sameText(String a, String b) {
+        return a == null ? b == null : a.equalsIgnoreCase(b);
+    }
+
+    /** Collector number usable for a printing lookup, or null when the card has none. */
+    private static String lookupCollectorNumber(PaperCard c) {
+        final String collectorNum = c.getCollectorNumber();
+        if (StringUtils.isBlank(collectorNum)
+                || IPaperCard.NO_COLLECTOR_NUMBER.equals(collectorNum)
+                || "0".equals(collectorNum)) {
+            return null;
+        }
+        return collectorNum;
+    }
+
+    /** Scryfall set code for the card's edition, or null when the edition has none. */
+    private static String lookupScryfallCode(PaperCard c) {
+        final CardEdition edition = StaticData.instance().getEditions().get(c.getEdition());
+        if (edition == null) return null;
+        final String scryfallCode = edition.getScryfallCode();
+        return StringUtils.isBlank(scryfallCode) ? null : scryfallCode;
+    }
+
     /** Scryfall API, then cardforge, for the requested printing. */
     private static String buildFallbackUrl(PaperCard c, String face) {
-        final String collectorNum = c.getCollectorNumber();
-        final boolean hasCollectorNum = !IPaperCard.NO_COLLECTOR_NUMBER.equals(collectorNum)
-                && !"0".equals(collectorNum)
-                && !StringUtils.isBlank(collectorNum);
+        final String collectorNum = lookupCollectorNumber(c);
+        final String scryfallCode = lookupScryfallCode(c);
+        final boolean hasCollectorNum = collectorNum != null;
+        final boolean hasScryfallCode = scryfallCode != null;
 
-        final CardEdition edition = hasCollectorNum
-                ? StaticData.instance().getEditions().get(c.getEdition()) : null;
-        final String scryfallCode = (edition != null) ? edition.getScryfallCode() : null;
-        final boolean hasScryfallCode = !StringUtils.isBlank(scryfallCode);
+        final CardEdition edition = StaticData.instance().getEditions().get(c.getEdition());
         final String preferredLang = FModel.getPreferences().getPref(ForgePreferences.FPref.UI_CARD_DOWNLOAD_LANG);
         final String langCode = (edition != null && hasScryfallCode)
                 ? CdnUuidCache.resolvePreferredLangCode(preferredLang, scryfallCode, collectorNum, edition.getCardsLangCode())
